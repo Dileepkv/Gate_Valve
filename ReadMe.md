@@ -1,8 +1,8 @@
 # Project: Gate_valve
 
-## Brief: Remote monitoring system, Device is used to control VFD remotely via GSM and also monitoring its data. 
-1.Board Ver:
-2.FW Ver:
+## Brief: The remote monitoring system, The Device controls VFD remotely via GSM and monitors its data. 
+1. Board Ver:
+2. FW Ver:
 3. MCU: stm32g071xx
 
 
