@@ -4,6 +4,7 @@
 1. Board Ver:
 2. FW Ver:
 3. MCU: stm32g071xx
+4. lib: STM32Cube_FW_G0_V1.6.2
 
 
 # Installing the Project for the First Time
