@@ -15,7 +15,7 @@
 
 # Download and Debug
 
-## IAR Workbench with ST-Link
+## STMcubeIDE ST-Link
 
 ### Operation
 
