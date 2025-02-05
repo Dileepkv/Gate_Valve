@@ -10,9 +10,10 @@
 # Installing the Project for the First Time
 
 ## Requirements
-1. **STM32CubeMX** version and **STM32CubeIDE** version 
+1. **STM32CubeMX** version 1.16.1 and **STM32CubeIDE** version 6.12.1
 
 ## Building the Project
+1. just open gate_valve.ioc file and generate code, and ensure checked-out files are not changed.
 
 # Download and Debug
 
