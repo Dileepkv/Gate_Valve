@@ -32,7 +32,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define GSM_BUFFER_SIZE 512
+// Buffer definitions
+#define GSM_BUFFER_SIZE 1024
 #define DEBUG_BUFFER_SIZE 512
 
 #define RS485_ENABLE
@@ -63,10 +64,13 @@ UART_HandleTypeDef huart3; // GSM module
 UART_HandleTypeDef huart4; // Debug Uart
 
 /* USER CODE BEGIN PV */
-char GSMrxBuffer[GSM_BUFFER_SIZE]; // Buffer for UART3 reception
-volatile char GSMrxData; // Single-byte buffer for ISR
-uint16_t GSMrxIndex = 0;
-volatile uint32_t sysTickCounter = 0;
+// Global variables
+char GSMBuffer[GSM_BUFFER_SIZE];
+volatile uint16_t GSMBufferIndex = 0;
+volatile uint8_t GSMResponseReady = 0;
+volatile char GSMRxChar;
+// Global variables for timing
+volatile uint32_t tickCounter = 0;
 char DebugBuffer[DEBUG_BUFFER_SIZE+11]; // Buffer for debug messages //offset 11 is for print response
 
 // APN Configuration
@@ -92,42 +96,41 @@ void HTTPGetRequest(void);
 /* Private user code ---------------------------------------------------------*/
 
 
-/**
- * @brief  SysTick Interrupt Handler
- */
+
+
+// SysTick handler
 void SysTick_Handler(void) {
-    if (sysTickCounter > 0) {
-        sysTickCounter--;
+    if(tickCounter > 0) {
+        tickCounter--;
     }
 }
 
-/**
- * @brief  Delay function using SysTick
- * @param  ms: Milliseconds to wait
- */
+// Delay function using SysTick
 void DelayMs(uint32_t ms) {
-    sysTickCounter = ms;
-    while (sysTickCounter);  // Wait until counter reaches zero
+    tickCounter = ms;
+    while(tickCounter != 0);
 }
 
 /* USER CODE BEGIN 0 */
-void GSMUARTInit(void)
-{
-    HAL_UART_Receive_IT(&huart3, (uint8_t*)&GSMrxData, 1); // Start UART3 interrupt
+// Initialize GSM UART with interrupts
+void GSM_UART_Init(void) {
+    // Enable UART3 interrupt reception
+    HAL_UART_Receive_IT(&huart3, (uint8_t*)&GSMRxChar, 1);
 }
 
 /**
  * @brief  UART Rx Complete Callback (Interrupt Handler)
  * @param  huart: UART handle pointer
  */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART3) {  // Check if interrupt is from UART3 (GSM)
-        if (GSMrxIndex < GSM_BUFFER_SIZE - 1) {
-            GSMrxBuffer[GSMrxIndex++] = GSMrxData;
+// UART Reception Callback
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if(huart->Instance == USART3) {
+        if(GSMBufferIndex < GSM_BUFFER_SIZE - 1) {
+            GSMBuffer[GSMBufferIndex++] = GSMRxChar;
+            GSMBuffer[GSMBufferIndex] = '\0';
         }
-        GSMrxBuffer[GSMrxIndex] = '\0'; // Null-terminate the string
-        HAL_UART_Receive_IT(&huart3, (uint8_t*)&GSMrxData, 1); // Re-enable interrupt
+        // Re-enable interrupt reception
+        HAL_UART_Receive_IT(&huart3, (uint8_t*)&GSMRxChar, 1);
     }
 }
 
@@ -135,14 +138,128 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
  * @brief  Sends AT command to EC200U
  * @param  cmd: Command string to send
  */
-void GSMSendCommand(const char *cmd) {
-    HAL_UART_Transmit(&huart3, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-    HAL_UART_Transmit(&huart3, (uint8_t*)"\r\n", 2, HAL_MAX_DELAY);
+// Send AT Command with Debug Output
+void GSM_SendCommand(const char* cmd) {
+    char debugBuff[DEBUG_BUFFER_SIZE];
 
-    snprintf(DebugBuffer, sizeof(DebugBuffer), "Sent: %s\n", cmd);
-    HAL_UART_Transmit(&huart4, (uint8_t*)DebugBuffer, strlen(DebugBuffer), HAL_MAX_DELAY);
+    // Send command to GSM
+    HAL_UART_Transmit(&huart3, (uint8_t*)cmd, strlen(cmd), 100);
+    HAL_UART_Transmit(&huart3, (uint8_t*)"\r\n", 2, 100);
+
+    // Debug output
+    snprintf(debugBuff, DEBUG_BUFFER_SIZE, "AT Command: %s\r\n", cmd);
+    HAL_UART_Transmit(&huart4, (uint8_t*)debugBuff, strlen(debugBuff), 100);
 }
 
+// Wait for GSM response with timeout
+uint8_t GSM_WaitResponse(const char* expectedResponse, uint32_t timeout) {
+    uint32_t startTime = tickCounter;
+    char debugBuff[DEBUG_BUFFER_SIZE];
+
+    while(tickCounter - startTime < timeout) {
+        if(strstr(GSMBuffer, expectedResponse)) {
+            // Debug output
+            snprintf(debugBuff, DEBUG_BUFFER_SIZE, "Response: %s\r\n", GSMBuffer);
+            HAL_UART_Transmit(&huart4, (uint8_t*)debugBuff, strlen(debugBuff), 100);
+
+            // Clear buffer
+            memset(GSMBuffer, 0, GSM_BUFFER_SIZE);
+            GSMBufferIndex = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// EC200U Power-up sequence
+void EC200U_PowerUp(void) {
+    // 1. Enable 3.8V power supply
+    HAL_GPIO_WritePin(MODEM_3V8_EN_GPIO_Port, MODEM_3V8_EN_Pin, GPIO_PIN_SET);
+    DelayMs(200); // Wait for power stabilization
+
+    // 2. Pull PWRKEY high for at least 100ms (as per EC200U datasheet)
+    HAL_GPIO_WritePin(MODEM_PWRKEY_GPIO_Port, MODEM_PWRKEY_Pin, GPIO_PIN_SET);
+    DelayMs(200);  // 200ms for margin
+    HAL_GPIO_WritePin(MODEM_PWRKEY_GPIO_Port, MODEM_PWRKEY_Pin, GPIO_PIN_RESET);
+
+    // 3. Wait for module to initialize
+    DelayMs(5000);  // Give module time to boot
+}
+
+// HTTP Connection Setup and Request
+uint8_t HTTP_Setup(const char* apn, const char* url) {
+    char cmdBuffer[128];
+
+    // 1. Check if module is responding
+    GSM_SendCommand("AT");
+    if(!GSM_WaitResponse("OK", 1000)) return 0;
+
+    // 2. Set APN
+    snprintf(cmdBuffer, sizeof(cmdBuffer), "AT+CGDCONT=1,\"IP\",\"%s\"", apn);
+    GSM_SendCommand(cmdBuffer);
+    if(!GSM_WaitResponse("OK", 2000)) return 0;
+
+    // 3. Activate PDP context
+    GSM_SendCommand("AT+QIACT=1");
+    if(!GSM_WaitResponse("OK", 10000)) return 0;  // Longer timeout for network registration
+
+    // 4. Configure HTTP URL
+    snprintf(cmdBuffer, sizeof(cmdBuffer), "AT+QHTTPURL=%d,80", strlen(url));
+    GSM_SendCommand(cmdBuffer);
+    if(!GSM_WaitResponse("CONNECT", 1000)) return 0;
+
+    // 5. Send URL
+    GSM_SendCommand(url);
+    if(!GSM_WaitResponse("OK", 2000)) return 0;
+
+    return 1;
+}
+
+// Perform HTTP GET Request
+uint8_t HTTP_GET(void) {
+    // Send HTTP GET command
+    GSM_SendCommand("AT+QHTTPGET=80");
+
+    // Wait for response with longer timeout
+    if(!GSM_WaitResponse("OK", 10000)) return 0;
+
+    // Wait for +QHTTPGET response
+    if(!GSM_WaitResponse("+QHTTPGET: 0,200", 15000)) return 0;
+
+    return 1;
+}
+
+// Main initialization and HTTP request sequence
+void GSM_HTTP_Init(void) {
+    char debugBuff[DEBUG_BUFFER_SIZE];
+
+    // Initialize UART for GSM
+    GSM_UART_Init();
+
+    // Power up EC200U
+    snprintf(debugBuff, DEBUG_BUFFER_SIZE, "Initializing EC200U...\r\n");
+    HAL_UART_Transmit(&huart4, (uint8_t*)debugBuff, strlen(debugBuff), 100);
+
+    EC200U_PowerUp();
+
+    // Setup HTTP connection
+    if(HTTP_Setup(apn, http_url)) {
+        snprintf(debugBuff, DEBUG_BUFFER_SIZE, "HTTP Setup successful\r\n");
+        HAL_UART_Transmit(&huart4, (uint8_t*)debugBuff, strlen(debugBuff), 100);
+
+        // Perform HTTP GET
+        if(HTTP_GET()) {
+            snprintf(debugBuff, DEBUG_BUFFER_SIZE, "HTTP GET successful\r\n");
+        } else {
+            snprintf(debugBuff, DEBUG_BUFFER_SIZE, "HTTP GET failed\r\n");
+        }
+    } else {
+        snprintf(debugBuff, DEBUG_BUFFER_SIZE, "HTTP Setup failed\r\n");
+    }
+    HAL_UART_Transmit(&huart4, (uint8_t*)debugBuff, strlen(debugBuff), 100);
+}
+
+#if 0
 /**
  * @brief  Processes GSM Response
  */
@@ -185,7 +302,7 @@ void HTTPGetRequest(void) {
     DelayMs(5000);
     ProcessGSMResponse();
 }
-
+#endif
 
 
 /* USER CODE END 0 */
@@ -225,6 +342,12 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USART4_UART_Init();
   /* USER CODE BEGIN 2 */
+  // Initialize system tick for 1ms interrupts
+  SystemCoreClockUpdate();
+  SysTick_Config(SystemCoreClock / 1000);
+
+  // Initialize GSM and perform HTTP request
+  GSM_HTTP_Init();
 #if 0 //Ranjan
   //Welcome Messages
     printf("System Initializing Started...\n");
@@ -260,7 +383,7 @@ int main(void)
         printf("sending ATI");
         Send_AT_Command("ATI");
         HAL_Delay(2000);
-#endif //ranjan
+//#endif //ranjan
         GSMUARTInit();
    //Welcome Messages
 #warning why 4 sec delay???
@@ -287,7 +410,7 @@ int main(void)
     HAL_GPIO_WritePin(MODEM_APREADY_GPIO_Port, MODEM_APREADY_Pin, GPIO_PIN_SET);
     DelayMs(2000);
     HTTPGetRequest();
-
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
