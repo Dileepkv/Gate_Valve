@@ -261,6 +261,7 @@ int main(void)
         Send_AT_Command("ATI");
         HAL_Delay(2000);
 #endif //ranjan
+        GSMUARTInit();
    //Welcome Messages
 #warning why 4 sec delay???
     printf("System Initializing Started...\n");
